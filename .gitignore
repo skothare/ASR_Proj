@@ -1,2 +1,4 @@
 *.tab
 *.csv
+
+*.DS_Store
