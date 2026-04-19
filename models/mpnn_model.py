@@ -295,7 +295,7 @@ class MPNNModel:
         """
         assert self._model is not None, "Call fit() before uncertainty()"
  
-        # Keep dropout ON during inference — this is the MC Dropout trick
+        # Keep dropout ON during inference- MCDropout
         self._model.train()
  
         loader = DataLoader(graphs, batch_size=self.batch_size, shuffle=False)
@@ -315,7 +315,7 @@ class MPNNModel:
         samples = np.stack(all_sample_probs, axis=0)
  
         # Mean prediction across MC samples
-        p_mean = samples.mean(axis=0)          # (N,)
+        p_mean = samples.mean(axis=0)  # (N,)
         p_mean = np.clip(p_mean, 1e-9, 1-1e-9)
  
         if acquisition == 'entropy':
@@ -328,7 +328,7 @@ class MPNNModel:
             # BALD = H[y|x,D] - E_theta[H[y|x,theta]]
             # = entropy of mean prediction - mean entropy per sample
             # Isolates epistemic uncertainty from aleatoric noise
-            # Reference: Houlsby et al. 2011
+            # Reference: Houlsby et al. 2011: https://arxiv.org/abs/1112.5745
             H_mean = -(p_mean * np.log(p_mean) +
                       (1-p_mean) * np.log(1-p_mean))
             s_clip = np.clip(samples, 1e-9, 1-1e-9)

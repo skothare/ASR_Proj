@@ -1,60 +1,33 @@
 """
 active_learning/al_loop.py
-===========================
-Core active learning simulation loop.
 
-HOW THE LOOP WORKS — STEP BY STEP
-----------------------------------
-This mirrors exactly what your teammate described in Section 3.5-3.6 of the
-milestone, but is now a standalone function that accepts any initialization
-strategy and any base learner.
+Core active learning simulation loop — updated to handle both
+fingerprint-based models (RandomForestModel) and graph-based models (MPNNModel).
 
-  Given:
-    - Full training pool   (N molecules, all with known labels in simulation)
-    - Fixed test set       (never modified)
-    - Initial labelled set (chosen by DOE or random strategy)
-    - Batch size b         (number of molecules to query per iteration)
+What changed from the original:
+The original loop passed X_pool (numpy fingerprint arrays) to every model.
+MPNN models need PyG graph objects instead.  We handle this cleanly by:
 
-  Repeat until pool is exhausted or budget reached:
-    1. Train model on current labelled set
-    2. Evaluate on test set  → record AUPRC, AUROC
-    3. Run query strategy on the *unlabelled* pool → pick b molecules
-    4. "Label" them (in simulation: just look up their true y values)
-    5. Move them from unlabelled pool to labelled set
+  1. Detecting whether the model is a graph model via model.is_graph_model
+  2. Accepting an optional graphs_pool parameter alongside X_pool
+  3. When model.is_graph_model is True, passing graph subsets instead of
+     fingerprint subsets to fit/predict_proba/uncertainty
 
-  Key point on "labelling":
-    In a real drug discovery setting, step 4 would mean running an assay
-    (expensive, takes weeks).  In simulation, we already have all labels, so
-    we just reveal them.  The simulation is still informative because the
-    MODEL only sees the labelled subset — it has to generalise to the rest.
+Everything else: the labelled mask, hit recovery tracking, evaluation —
+is unchanged. RandomForestModel still works as before with zero modifications.
 
-QUERY STRATEGY: UNCERTAINTY SAMPLING
---------------------------------------
-We select the b molecules from the unlabelled pool that the current model is
-MOST UNCERTAIN about (highest entropy of the RF vote distribution).
-
-This is the active learning acquisition function.  The DOE comparison only
-changes the *initialisation*, not this step — so any difference in the AUPRC
-curves is purely attributable to the starting set.
-
-PARAMETERS
-----------
-model             : base learner (must have .fit, .predict_proba, .uncertainty,
-                    .clone_untrained methods)
-X_pool, y_pool    : full training pool (fingerprints + labels)
-X_test, y_test    : held-out test set (never touched during AL)
-init_indices      : np.ndarray  – indices selected by initialisation strategy
-batch_size        : int  – molecules to add per AL iteration (500 from your
-                            teammate's grid search)
-seed              : int  – for reproducibility
-
-RETURNS
--------
-List[EvalResult]  – one entry per AL iteration (for plotting)
+ACQUISITION MODES:
+acquisition : str (entropy, bald, weighted)
+  'entropy'  — standard uncertainty sampling (RF default, MPNN baseline)
+  'bald'     — BALD epistemic uncertainty via MC Dropout (MPNN only)
+  'weighted' — imbalance-aware: entropy × p̂_active 
+               Works for BOTH RF and MPNN:
+               - RF: entropy(x) × predict_proba(x)[:,1]
+               - MPNN: handled inside MPNNModel.uncertainty('weighted')
 """
 
 import numpy as np
-from typing import List
+from typing import List, Optional
 
 from evaluation.metrics import evaluate, EvalResult
 
@@ -69,15 +42,32 @@ def run_active_learning(
     batch_size: int = 500,
     seed: int = 42,
     verbose: bool = True,
+    # new parameters 
+    graphs_pool: Optional[List] = None,   # PyG graphs for MPNN
+    graphs_test: Optional[List] = None,   # PyG test graphs for MPNN
+    acquisition: str = 'entropy', # 'entropy', 'bald', 'weighted'
 ) -> List[EvalResult]:
     """
     Run the full active learning simulation and return per-iteration metrics.
+
+    For RF: pass X_pool and X_test (fingerprint arrays), leave graphs=None.
+    For MPNN: pass graphs_pool and graphs_test, X_pool/X_test still needed
+              for bookkeeping (y_pool indexing).
     """
     N = len(y_pool)
     total_actives_in_pool = int(y_pool.sum())
+    is_graph_model = getattr(model, 'is_graph_model', False)
 
-    # ── Initialise labelled / unlabelled bookkeeping ──────────────────────────
-    # We track which pool indices are labelled using a boolean mask.
+    # Validate: graph model needs graphs
+    if is_graph_model:
+        assert graphs_pool is not None, \
+            "MPNNModel requires graphs_pool to be provided to run_active_learning"
+        assert graphs_test is not None, \
+            "MPNNModel requires graphs_test to be provided to run_active_learning"
+        assert len(graphs_pool) == N, \
+            f"graphs_pool length {len(graphs_pool)} != y_pool length {N}"
+
+    # initialize labelled mask 
     labelled_mask = np.zeros(N, dtype=bool)
     labelled_mask[init_indices] = True
 
@@ -86,7 +76,8 @@ def run_active_learning(
 
     if verbose:
         n_init_active = y_pool[init_indices].sum()
-        print(f"\nAL loop starting")
+        model_type = "MPNN" if is_graph_model else "RF"
+        print(f"\nAL loop starting ({model_type}, acquisition={acquisition})")
         print(f"  Init set : {labelled_mask.sum():,} molecules  "
               f"({n_init_active} actives = "
               f"{100*n_init_active/labelled_mask.sum():.1f}%)")
@@ -94,64 +85,90 @@ def run_active_learning(
         print(f"  Max iterations: {(N - labelled_mask.sum()) // batch_size + 1}")
 
     while True:
-        # ── 1. Get current labelled set ───────────────────────────────────────
-        X_labeled = X_pool[labelled_mask]
-        y_labeled = y_pool[labelled_mask]
+        # 1. Get current labeled set 
+        labeled_indices = np.where(labelled_mask)[0]
+        y_labeled = y_pool[labeled_indices]
+
+        if is_graph_model:
+            data_labeled = [graphs_pool[i] for i in labeled_indices]
+        else:
+            X_labeled = X_pool[labeled_indices]
 
         # Guard: need at least 2 classes to train a classifier
         if len(np.unique(y_labeled)) < 2:
             if verbose:
                 print(f"  Iter {iteration}: skipping eval "
                       "(only one class in labelled set so far)")
-            # Still add more molecules before evaluating
         else:
-            # ── 2. Train on labelled set ──────────────────────────────────────
+            # 2. Train on labeled set 
             fresh_model = model.clone_untrained()
-            fresh_model.fit(X_labeled, y_labeled)
+            if is_graph_model:
+                fresh_model.fit(data_labeled, y_labeled)
+            else:
+                fresh_model.fit(X_labeled, y_labeled)
 
-            # ── 3. Evaluate on test set ───────────────────────────────────────
-            result = evaluate(
-                model=fresh_model,
-                X_test=X_test,
-                y_test=y_test,
-                n_labeled=int(labelled_mask.sum()),
-                total_actives_in_pool=total_actives_in_pool,
-                labeled_y=y_labeled,
-            )
+            # 3. Evaluate on test set 
+            if is_graph_model:
+                result = evaluate(
+                    model=fresh_model,
+                    X_test=graphs_test,# graphs for MPNN
+                    y_test=y_test,
+                    n_labeled=int(labelled_mask.sum()),
+                    total_actives_in_pool=total_actives_in_pool,
+                    labeled_y=y_labeled,
+                )
+            else:
+                result = evaluate(
+                    model=fresh_model,
+                    X_test=X_test,
+                    y_test=y_test,
+                    n_labeled=int(labelled_mask.sum()),
+                    total_actives_in_pool=total_actives_in_pool,
+                    labeled_y=y_labeled,
+                )
             results.append(result)
 
             if verbose and (iteration % 5 == 0 or iteration < 3):
+                hr = f"hits={result.hit_recovery:.3f}" if result.hit_recovery is not None else ""
                 print(f"  Iter {iteration:3d} | "
                       f"labeled={result.n_labeled:6,} | "
                       f"AUPRC={result.auprc:.4f} | "
-                      f"AUROC={result.auroc:.4f} | "
-                      f"hits={result.hit_recovery:.3f}" if result.hit_recovery else
-                      f"  Iter {iteration:3d} | "
-                      f"labeled={result.n_labeled:6,} | "
-                      f"AUPRC={result.auprc:.4f} | "
-                      f"AUROC={result.auroc:.4f}")
+                      f"AUROC={result.auroc:.4f} | {hr}")
 
-        # ── 4. Check if pool is exhausted ─────────────────────────────────────
+        # 4. Check if pool is exhausted 
         unlabelled_indices = np.where(~labelled_mask)[0]
         if len(unlabelled_indices) == 0:
             if verbose:
                 print("  Pool exhausted.")
             break
 
-        # ── 5. Query: pick batch_size most uncertain unlabelled molecules ─────
+        # 5. Query: pick batch_size most informative unlabeled molecules 
         actual_batch = min(batch_size, len(unlabelled_indices))
-        X_unlabelled = X_pool[unlabelled_indices]
 
-        # Uncertainty requires a trained model; skip on very first iteration
-        # if model wasn't trained (single-class guard above)
         if len(np.unique(y_labeled)) < 2:
-            # Fall back to random selection if no trained model yet
+            # Fall back to random if no trained model yet
             rng = np.random.default_rng(seed + iteration)
             chosen_positions = rng.choice(len(unlabelled_indices),
                                           size=actual_batch, replace=False)
         else:
-            unc = fresh_model.uncertainty(X_unlabelled)   # shape (M,)
-            # argsort descending: positions of most uncertain molecules
+            if is_graph_model:
+                unlabelled_graphs = [graphs_pool[i] for i in unlabelled_indices]
+                unc = fresh_model.uncertainty(unlabelled_graphs,
+                                              acquisition=acquisition)
+            else:
+                X_unlabelled = X_pool[unlabelled_indices]
+                if acquisition == 'weighted':
+                    # Imbalance-aware for RF:
+                    # score = entropy × p̂_active
+                    p_active = fresh_model.predict_proba(X_unlabelled)[:, 1]
+                    p_clip   = np.clip(p_active, 1e-9, 1-1e-9)
+                    entropy  = -(p_clip * np.log(p_clip) +
+                                (1-p_clip) * np.log(1-p_clip))
+                    unc = (entropy * p_active).astype(np.float32)
+                else:
+                    # Standard entropy (default RF behavior)
+                    unc = fresh_model.uncertainty(X_unlabelled)
+
             chosen_positions = np.argsort(unc)[::-1][:actual_batch]
 
         # Convert local positions back to pool indices
