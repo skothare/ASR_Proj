@@ -48,14 +48,16 @@ class _MPNNNet(nn.Module):
     - dropout_p: dropout probability applied after each MP round and in the MLP head
     """
 
-    def __init__(self, atom_feat_dim: int =9, bond_feat_dim: int =4, hidden_dim: int =128, num_layers: int =3, dropout_p: float =0.3):
+    def __init__(self, atom_feat_dim: int =9, bond_feat_dim: int =4, hidden_dim: int =128, num_layers: int =3, dropout_p: float =0.3, use_fingerprint: bool = False, fp_dim: int = 2048):
         super().__init__()
         self.atom_feat_dim = atom_feat_dim
         self.bond_feat_dim = bond_feat_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.dropout_p = dropout_p
-
+        self.use_fingerprint = use_fingerprint
+        self.fp_dim = fp_dim
+        
         self.atom_proj = nn.Linear(atom_feat_dim, hidden_dim) # project the raw atom features to hidden_dim
         # message passing layers:
         self.convs, self.norms = nn.ModuleList(), nn.ModuleList()
@@ -74,8 +76,9 @@ class _MPNNNet(nn.Module):
 
         # Establish and MLP classification head:
         # Input here is the pooled molecule vector (hidden_dim) and the output is a single logit
+        head_input_dim = hidden_dim + fp_dim if use_fingerprint else hidden_dim
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(head_input_dim, hidden_dim // 2),
             nn.GELU(),
             nn.Dropout(p=dropout_p), # MC Dropout in the head too
             nn.Linear(hidden_dim // 2, 1),
@@ -96,18 +99,22 @@ class _MPNNNet(nn.Module):
         )
  
         #project atom features 
-        h = F.relu(self.atom_proj(x))  # (total_atoms, hidden_dim)
+        h = F.gelu(self.atom_proj(x))  # (total_atoms, hidden_dim)
  
         # k rounds of message passing 
         # Each round: collect messages from neighbors weighted by bond features, apply residual connection, normalize, dropout
         for conv, norm in zip(self.convs, self.norms):
-            h_new = F.relu(conv(h, edge_index, edge_attr))
+            h_new = F.gelu(conv(h, edge_index, edge_attr))
             h = norm(h + h_new) # residual connection
             h  = self.mp_dropout(h) # dropout after each round
  
         # pool atoms → molecule vector 
         mol_vec = global_mean_pool(h, batch)  # (num_graphs, hidden_dim)
- 
+        # optional fingerprint fusion
+        if self.use_fingerprint and hasattr(data, "fp") and data.fp is not None:
+            # data.fp shape: (num_graphs, 1, 2048) → squeeze to (num_graphs, 2048)
+            fp = data.fp.squeeze(1).to(mol_vec.device)
+            mol_vec = torch.cat([mol_vec, fp], dim=-1)
         #  classification head 
         logits = self.head(mol_vec).squeeze(-1)  # (num_graphs,)
         return logits
@@ -150,6 +157,7 @@ class MPNNModel:
         mc_samples: int = 30,
         seed: int = 42,
         device: Optional[str] = None,
+        use_fingerprint: bool = False,
     ):
         self.hidden_dim  = hidden_dim
         self.num_layers  = num_layers
@@ -160,6 +168,7 @@ class MPNNModel:
         self.pos_weight  = pos_weight
         self.mc_samples  = mc_samples
         self.seed        = seed
+        self.use_fingerprint = use_fingerprint
  
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -171,69 +180,90 @@ class MPNNModel:
     # training
  
     def fit(
-        self,
-        graphs: List[Data],
-        y: np.ndarray,
-        verbose: bool = False,
+    self,
+    graphs: List[Data],
+    y: np.ndarray,
+    verbose: bool = False,
+    graphs_val: Optional[List] = None,  
+    y_val: Optional[np.ndarray] = None, 
+    patience: int = 10,                   
     ) -> "MPNNModel":
-        """
-        Train the MPNN on the current labeled set.
- 
-        Parameters
-        ----------
-        graphs : list of PyG Data objects (from graph_builder.build_graph_dataset)
-        y      : np.ndarray shape (N,)  labels (0/1)
-                 Note: y values should already be embedded in graph.y,
-                 but we accept y separately for interface consistency
-        """
         torch.manual_seed(self.seed)
- 
-        # Attach labels to graphs (in case they're not already there)
         for g, label in zip(graphs, y):
             g.y = torch.tensor([float(label)], dtype=torch.float)
- 
-        # Build model fresh (called by clone_untrained pattern)
+
         self._model = _MPNNNet(
-            atom_feat_dim=9,
-            bond_feat_dim=4,
-            hidden_dim=self.hidden_dim,
-            num_layers=self.num_layers,
-            dropout_p=self.dropout_p,
+            atom_feat_dim=9, bond_feat_dim=4,
+            hidden_dim=self.hidden_dim, num_layers=self.num_layers,
+            dropout_p=self.dropout_p, use_fingerprint=self.use_fingerprint,
         ).to(self.device)
- 
+
         loader = DataLoader(graphs, batch_size=self.batch_size, shuffle=True)
-        optimizer = torch.optim.Adam(self._model.parameters(), lr=self.lr,
-                                     weight_decay=1e-4)
-        pos_w  = torch.tensor([self.pos_weight], device=self.device)
+        optimizer = torch.optim.Adam(self._model.parameters(),
+                                    lr=self.lr, weight_decay=1e-4)
+        pos_w   = torch.tensor([self.pos_weight], device=self.device)
         loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_w)
- 
-        # Learning rate scheduler — reduces LR when loss plateaus
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, patience=5, factor=0.5, verbose=False
-        )
- 
-        self._model.train()
+            optimizer, patience=5, factor=0.5)
+
+        best_val_auprc = -1.0
+        epochs_no_improve = 0
+        best_state = None
+
         for epoch in range(self.n_epochs):
+            self._model.train()
             total_loss = 0.0
             for batch in loader:
                 batch = batch.to(self.device)
                 optimizer.zero_grad()
                 logits = self._model(batch)
-                labels = batch.y.to(self.device)
-                loss   = loss_fn(logits, labels)
+                loss   = loss_fn(logits, batch.y.to(self.device))
                 loss.backward()
-                # gradient clipping prevents exploding gradients (important
-                # with NNConv's edge MLP)
                 torch.nn.utils.clip_grad_norm_(self._model.parameters(), 1.0)
                 optimizer.step()
                 total_loss += loss.item()
- 
+
             avg_loss = total_loss / len(loader)
             scheduler.step(avg_loss)
- 
+
+            # Log to WandB if a run is active
+            try:
+                import wandb
+                if wandb.run is not None:
+                    wandb.log({"train/loss": avg_loss, "epoch": epoch})
+            except Exception:
+                pass   # silently skip if wandb not available
+
+            # Early stopping on validation AUPRC
+            if graphs_val is not None and y_val is not None:
+                from sklearn.metrics import average_precision_score
+                proba = self.predict_proba(graphs_val)[:, 1]
+                val_auprc = average_precision_score(y_val, proba)
+
+                if val_auprc > best_val_auprc:
+                    best_val_auprc = val_auprc
+                    best_state = {k: v.cpu().clone()
+                                for k, v in self._model.state_dict().items()}
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+                    if epochs_no_improve >= patience:
+                        if verbose:
+                            print(f"    Early stop at epoch {epoch} "
+                                f"(best val AUPRC={best_val_auprc:.4f})")
+                        break
+
             if verbose and (epoch % 10 == 0 or epoch == self.n_epochs - 1):
-                print(f"    Epoch {epoch:3d}/{self.n_epochs} | loss={avg_loss:.4f}")
- 
+                val_str = (f" | val_auprc={best_val_auprc:.4f}"
+                        if graphs_val is not None else "")
+                print(f"    Epoch {epoch:3d}/{self.n_epochs} | "
+                    f"loss={avg_loss:.4f}{val_str}")
+
+        # Restore best weights if early stopping was used
+        if best_state is not None:
+            self._model.load_state_dict(
+                {k: v.to(self.device) for k, v in best_state.items()})
+
         return self
  
     # inference
@@ -278,8 +308,7 @@ class MPNNModel:
         Sets model to TRAIN mode (dropout ON) and runs mc_samples forward
         passes. The variance across passes is the uncertainty signal.
  
-        Parameters
-        ----------
+        Parameters:
         graphs      : list of PyG Data objects
         acquisition : 'entropy'   — Shannon entropy of mean prediction
                                     (standard uncertainty sampling)
@@ -289,8 +318,7 @@ class MPNNModel:
                       'weighted'  — imbalance-aware: entropy × p̂_active
                                     biases queries toward predicted actives
  
-        Returns
-        -------
+        Returns:
         scores : shape (N,)  float32  — higher = more informative to query
         """
         assert self._model is not None, "Call fit() before uncertainty()"
@@ -328,7 +356,7 @@ class MPNNModel:
             # BALD = H[y|x,D] - E_theta[H[y|x,theta]]
             # = entropy of mean prediction - mean entropy per sample
             # Isolates epistemic uncertainty from aleatoric noise
-            # Reference: Houlsby et al. 2011: https://arxiv.org/abs/1112.5745
+            # Reference: Houlsby et al. 2011: https://arxiv.org/abs/1112.5745, Eq2
             H_mean = -(p_mean * np.log(p_mean) +
                       (1-p_mean) * np.log(1-p_mean))
             s_clip = np.clip(samples, 1e-9, 1-1e-9)
@@ -366,6 +394,7 @@ class MPNNModel:
             mc_samples=self.mc_samples,
             seed=self.seed,
             device=str(self.device),
+            use_fingerprint=self.use_fingerprint,
         )
  
     @property

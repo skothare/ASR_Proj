@@ -46,6 +46,8 @@ def run_active_learning(
     graphs_pool: Optional[List] = None,   # PyG graphs for MPNN
     graphs_test: Optional[List] = None,   # PyG test graphs for MPNN
     acquisition: str = 'entropy', # 'entropy', 'bald', 'weighted'
+    graphs_val: Optional[List] = None, 
+    y_val: Optional[np.ndarray] = None,
 ) -> List[EvalResult]:
     """
     Run the full active learning simulation and return per-iteration metrics.
@@ -100,10 +102,15 @@ def run_active_learning(
                 print(f"  Iter {iteration}: skipping eval "
                       "(only one class in labelled set so far)")
         else:
-            # 2. Train on labeled set 
+            # 2. Train on labeled set
             fresh_model = model.clone_untrained()
             if is_graph_model:
-                fresh_model.fit(data_labeled, y_labeled)
+                fresh_model.fit(
+                    data_labeled, y_labeled,
+                    graphs_val=graphs_val,
+                    y_val=y_val,
+                    patience=10,
+                )
             else:
                 fresh_model.fit(X_labeled, y_labeled)
 

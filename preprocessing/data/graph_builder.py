@@ -117,6 +117,7 @@ def _bond_features(bond: rdchem.Bond) -> List[float]:
 def smiles_to_graph(
     smiles: str,
     label: Optional[float] = None,
+    include_fingerprint: bool = False,
 ) -> Optional[Data]:
     """
     Convert a SMILES string to a PyTorch Geometric Data object.
@@ -165,6 +166,10 @@ def smiles_to_graph(
 
     # assemble Data object 
     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+    if include_fingerprint:
+        from rdkit.Chem import AllChem
+        fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+        data.fp = torch.tensor(list(fp), dtype=torch.float).unsqueeze(0)
 
     if label is not None:
         data.y = torch.tensor([label], dtype=torch.float)
@@ -178,6 +183,7 @@ def build_graph_dataset(
     smiles_list: List[str],
     labels: Optional[np.ndarray] = None,
     verbose: bool = True,
+    include_fingerprint: bool = False,
 ) -> List[Data]:
     """
     Convert a list of SMILES strings to a list of PyG Data objects.
@@ -189,7 +195,7 @@ def build_graph_dataset(
     smiles_list : list of str
     labels      : np.ndarray shape (N,) or None (0/1 labels)
     verbose     : whether to print parse statistics
-
+    include_fingerprint : whether to include fingerprint features
     Returns:
     graphs         : list of Data objects (len <= len(smiles_list))
     valid_indices  : np.ndarray of indices into the original smiles_list
@@ -200,7 +206,7 @@ def build_graph_dataset(
 
     for i, smi in enumerate(smiles_list):
         label = float(labels[i]) if labels is not None else None
-        g = smiles_to_graph(smi, label=label)
+        g = smiles_to_graph(smi, label=label, include_fingerprint=include_fingerprint)
         if g is not None:
             graphs.append(g)
             valid_indices.append(i)
