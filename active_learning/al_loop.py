@@ -86,8 +86,10 @@ def run_active_learning(
         print(f"  Pool size: {N:,}   Batch size: {batch_size}")
         print(f"  Max iterations: {(N - labelled_mask.sum()) // batch_size + 1}")
 
+    # Initialize warm start state (before the while loop)
+    warm_model = None
+
     while True:
-        # 1. Get current labeled set 
         labeled_indices = np.where(labelled_mask)[0]
         y_labeled = y_pool[labeled_indices]
 
@@ -96,29 +98,39 @@ def run_active_learning(
         else:
             X_labeled = X_pool[labeled_indices]
 
-        # Guard: need at least 2 classes to train a classifier
         if len(np.unique(y_labeled)) < 2:
             if verbose:
-                print(f"  Iter {iteration}: skipping eval "
-                      "(only one class in labelled set so far)")
+                print(f"  Iter {iteration}: skipping (only one class)")
         else:
-            # 2. Train on labeled set
-            fresh_model = model.clone_untrained()
+            # ── Warm start: reuse previous model weights ──────────────
+            if warm_model is None:
+                current_model = model.clone_untrained()
+            else:
+                current_model = warm_model
+
+            # LR and patience decay for fine-tuning stability
+            lr_now      = 3e-4 if iteration < 3 else 1e-4
+            patience_now = 10  if iteration < 5 else 7
+
             if is_graph_model:
-                fresh_model.fit(
+                current_model.fit(
                     data_labeled, y_labeled,
                     graphs_val=graphs_val,
                     y_val=y_val,
-                    patience=10,
+                    patience=patience_now,
+                    lr_override=lr_now,
                 )
             else:
-                fresh_model.fit(X_labeled, y_labeled)
+                current_model.fit(X_labeled, y_labeled)
 
-            # 3. Evaluate on test set 
+            warm_model  = current_model   # save for next iteration
+            fresh_model = current_model   # keep name for evaluate() below
+
+            # ── Evaluate on test set ───────────────────────────────────
             if is_graph_model:
                 result = evaluate(
                     model=fresh_model,
-                    X_test=graphs_test,# graphs for MPNN
+                    X_test=graphs_test,
                     y_test=y_test,
                     n_labeled=int(labelled_mask.sum()),
                     total_actives_in_pool=total_actives_in_pool,
@@ -162,6 +174,9 @@ def run_active_learning(
                 unlabelled_graphs = [graphs_pool[i] for i in unlabelled_indices]
                 unc = fresh_model.uncertainty(unlabelled_graphs,
                                               acquisition=acquisition)
+            elif acquisition == 'random':
+                rng = np.random.default_rng(seed + iteration)
+                unc = rng.random(len(unlabelled_indices)).astype(np.float32)
             else:
                 X_unlabelled = X_pool[unlabelled_indices]
                 if acquisition == 'weighted':
@@ -172,6 +187,8 @@ def run_active_learning(
                     entropy  = -(p_clip * np.log(p_clip) +
                                 (1-p_clip) * np.log(1-p_clip))
                     unc = (entropy * p_active).astype(np.float32)
+                elif acquisition == 'bald':
+                    unc = fresh_model.bald_uncertainty(X_unlabelled) #uses tree committee to compute uncertainty
                 else:
                     # Standard entropy (default RF behavior)
                     unc = fresh_model.uncertainty(X_unlabelled)
