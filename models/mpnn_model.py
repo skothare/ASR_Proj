@@ -375,7 +375,7 @@ class MPNNModel:
  
         else:
             raise ValueError(f"Unknown acquisition: {acquisition}. "
-                           f"Choose from 'entropy', 'bald', 'weighted'")
+                            f"Choose from 'entropy', 'bald', 'weighted'")
  
         return scores.astype(np.float32)
  
@@ -396,7 +396,32 @@ class MPNNModel:
             device=str(self.device),
             use_fingerprint=self.use_fingerprint,
         )
- 
+    
+    def get_embeddings(self, graphs: List[Data]) -> np.ndarray:
+        """
+        Return mol_vec embeddings shape (N, hidden_dim) for use in
+        diversity/density sampling. Uses eval mode (dropout OFF).
+        """
+        assert self._model is not None, "Call fit() before get_embeddings()"
+        self._model.eval()
+        loader = DataLoader(graphs, batch_size=self.batch_size, shuffle=False)
+        all_vecs = []
+
+        with torch.no_grad():
+            for batch in loader:
+                batch = batch.to(self.device)
+                x, edge_index, edge_attr, b = (
+                    batch.x, batch.edge_index, batch.edge_attr, batch.batch
+                )
+                h = F.gelu(self._model.atom_proj(x))
+                for conv, norm in zip(self._model.convs, self._model.norms):
+                    h_new = F.gelu(conv(h, edge_index, edge_attr))
+                    h = norm(h + h_new)
+                    h = self._model.mp_dropout(h)
+                mol_vec = global_mean_pool(h, b)
+                all_vecs.append(mol_vec.cpu().numpy())
+
+        return np.concatenate(all_vecs, axis=0)
     @property
     def is_graph_model(self) -> bool:
         """
