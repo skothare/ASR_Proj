@@ -48,6 +48,7 @@ def run_active_learning(
     acquisition: str = 'entropy', # 'entropy', 'bald', 'weighted'
     graphs_val: Optional[List] = None, 
     y_val: Optional[np.ndarray] = None,
+    warm_start: bool = True,
 ) -> List[EvalResult]:
     """
     Run the full active learning simulation and return per-iteration metrics.
@@ -75,6 +76,7 @@ def run_active_learning(
 
     results: List[EvalResult] = []
     iteration = 0
+    
 
     if verbose:
         n_init_active = y_pool[init_indices].sum()
@@ -91,7 +93,7 @@ def run_active_learning(
 
     while True:
         labeled_indices = np.where(labelled_mask)[0]
-        y_labeled = y_pool[labeled_indices]
+        y_labeled       = y_pool[labeled_indices]
 
         if is_graph_model:
             data_labeled = [graphs_pool[i] for i in labeled_indices]
@@ -102,15 +104,17 @@ def run_active_learning(
             if verbose:
                 print(f"  Iter {iteration}: skipping (only one class)")
         else:
-            # ── Warm start: reuse previous model weights ──────────────
-            if warm_model is None:
-                current_model = model.clone_untrained()
-            else:
+            # ── Model selection: warm or cold start ───────────────────────
+            if warm_start and warm_model is not None:
+                # Warm: continue fine-tuning from previous iteration's weights
                 current_model = warm_model
-
-            # LR and patience decay for fine-tuning stability
-            lr_now      = 3e-4 if iteration < 3 else 1e-4
-            patience_now = 10  if iteration < 5 else 7
+                lr_now        = 3e-4 if iteration < 3 else 1e-4
+                patience_now  = 10   if iteration < 5 else 7
+            else:
+                # Cold: fresh random weights every iteration
+                current_model = model.clone_untrained()
+                lr_now        = None   # use model's default LR
+                patience_now  = 10
 
             if is_graph_model:
                 current_model.fit(
@@ -123,8 +127,9 @@ def run_active_learning(
             else:
                 current_model.fit(X_labeled, y_labeled)
 
-            warm_model  = current_model   # save for next iteration
-            fresh_model = current_model   # keep name for evaluate() below
+            warm_model  = current_model   # always save — only used if warm_start=True
+            fresh_model = current_model
+
 
             # ── Evaluate on test set ───────────────────────────────────
             if is_graph_model:

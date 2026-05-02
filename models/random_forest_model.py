@@ -136,6 +136,24 @@ class RandomForestModel:
 
         scores = H_mean - E_H                         # (N,) — BALD score
         return scores.astype(np.float32)
+
+    def expected_improvement(self, X: np.ndarray,
+                          best_so_far: float = 0.035) -> np.ndarray:
+        """
+        Expected Improvement for RF using tree ensemble as surrogate.
+        EI = (p_mean - best) * Phi(Z) + sigma * phi(Z)
+        where Z = (p_mean - best) / sigma
+        """
+        from scipy.stats import norm
+        tree_probs = np.array([
+            tree.predict_proba(X)[:, 1]
+            for tree in self._model.estimators_
+        ])                                          # (n_trees, N)
+        p_mean = tree_probs.mean(axis=0)
+        sigma  = tree_probs.std(axis=0) + 1e-9
+        Z      = (p_mean - best_so_far) / sigma
+        EI     = (p_mean - best_so_far) * norm.cdf(Z) + sigma * norm.pdf(Z)
+        return np.maximum(EI, 0).astype(np.float32)
         
     def clone_untrained(self) -> "RandomForestModel":
         """Return a fresh (untrained) copy with the same hyperparameters."""

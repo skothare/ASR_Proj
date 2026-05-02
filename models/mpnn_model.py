@@ -385,10 +385,18 @@ class MPNNModel:
             H = -(p_mean * np.log(p_mean) +
                  (1-p_mean) * np.log(1-p_mean))
             scores = H * p_mean
+
+        elif acquisition == 'expected_improvement':
+            from scipy.stats import norm as scipy_norm
+            sigma  = samples.std(axis=0) + 1e-9
+            best   = float(p_mean.max() * 0.5)
+            Z      = (p_mean - best) / sigma
+            EI     = (p_mean - best) * scipy_norm.cdf(Z) + sigma * scipy_norm.pdf(Z)
+            scores = np.maximum(EI, 0)
  
         else:
             raise ValueError(f"Unknown acquisition: {acquisition}. "
-                           f"Choose from 'entropy', 'bald', 'weighted'")
+                           f"Choose from 'entropy', 'bald', 'weighted', 'expected_improvement'")
  
         return scores.astype(np.float32)
  
