@@ -226,5 +226,5 @@ Each MPNN seed takes ~90–120 minutes on a T4/A100 GPU.
 Each AL run logs `al/auprc`, `al/auroc`, `al/hit_recovery`, `al/n_actives_found` per iteration.
 
 ## References
-1. Leveraged Claude at different planning and coding stages to construct a methodical codebase and troubleshoot based on our technical directions and specifications.
-2. 
+1. Utilized Claude at different planning and coding stages to construct a methodical codebase and troubleshoot based on our technical directions and specifications.
+2. Used Gemini to create MolAL logo
