@@ -1,8 +1,8 @@
-# MolAL: Molecular Active Learning for Molecular Hit Identification using HIV Drug Discovery Data
-
 <p align="center">
   <img src="preprocessing/data/MolAL_logo.png" alt="MolAL Logo" width="200">
 </p>
+
+# MolAL: Molecular Active Learning for Molecular Hit Identification using HIV Drug Discovery Data
 
 **Course:** CMU 02-750 Automation of Scientific Research  
 **Authors:** Juhi Munmun Gupta, Sumeet Kothare
@@ -15,6 +15,23 @@
 This project benchmarks pool-based active learning strategies for molecular hit identification on the TDC HIV dataset. We compare two base learners (Random Forest with Morgan fingerprints, MPNN with graph-based representations) across six acquisition functions (Shannon Entropy, Weighted Entropy, BALD, Diversity, Density, Random) and four initialization strategies (Random, MaxMin, k-Medoids, Supervised Transfer).
 
 The central question: **can active learning recover HIV inhibitors faster than random screening under severe class imbalance?**
+
+---
+
+## Results Overview
+
+![MolAL Results Overview](preprocessing/data/molal_results_overview.png)
+
+**Top row:** DOE initialization comparison (Random vs MaxMin vs k-Medoids vs
+Supervised Transfer) using RF + Shannon Entropy acquisition across 3 seeds (± std).
+All four strategies converge to identical performance within two iterations,
+establishing that **acquisition function design — not cold-start selection —
+drives sample efficiency** under 96.5% class imbalance.
+
+**Bottom row:** MPNN active learning across six acquisition functions (3 seeds ± std).
+Imbalance-aware strategies (Weighted Entropy, Expected Improvement) substantially
+outperform standard uncertainty sampling, recovering ~80% of HIV actives
+by labeling only 50% of the candidate pool.
 
 ---
 
