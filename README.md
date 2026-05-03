@@ -22,16 +22,15 @@ The central question: **can active learning recover HIV inhibitors faster than r
 
 ![MolAL Results Overview](preprocessing/data/molal_results_overview.png)
 
-**Top row:** DOE initialization comparison (Random vs MaxMin vs k-Medoids vs
-Supervised Transfer) using RF + Shannon Entropy acquisition across 3 seeds (± std).
-All four strategies converge to identical performance within two iterations,
-establishing that **acquisition function design — not cold-start selection —
-drives sample efficiency** under 96.5% class imbalance.
+**Top row — DOE Initialization:** All four initialization strategies (Random,
+MaxMin, k-Medoids, Supervised Transfer) converge to identical performance
+within two AL iterations. Acquisition function design, rather than an initialization strategy, drives sample efficiency under severe class imbalance.
 
-**Bottom row:** MPNN active learning across six acquisition functions (3 seeds ± std).
-Imbalance-aware strategies (Weighted Entropy, Expected Improvement) substantially
-outperform standard uncertainty sampling, recovering ~80% of HIV actives
-by labeling only 50% of the candidate pool.
+**Middle row — Random Forest:** Imbalance-aware acquisition functions (Weighted Entropy, BALD) achieve best hit recovery. Diversity sampling performs at the level of random screening.
+
+**Bottom row — MPNN:** Expected Improvement and Weighted Entropy recover
+~80% of HIV actives at 50% labeling budget. Higher variance than RF reflects
+graph representation instability under 3.5% active rate.
 
 ---
 
