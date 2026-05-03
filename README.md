@@ -73,6 +73,52 @@ ASR_Project/
 ```
 
 ---
+## Prerequisites and Setup
+
+### 1. Google Account and Google Drive
+This project runs on Google Colab with files stored on Google Drive.
+Clone or copy the repository to your Drive at exactly this path:
+MyDrive/ASR_Project/
+If you use a different folder name, update `PROJECT_ROOT` in Cell 3 and
+Cell A3 of `colab_runner.ipynb` to match your actual path.
+
+### 2. Google Colab
+Open `colab_runner.ipynb` directly from Google Drive in Colab.
+- RF experiments: CPU runtime is sufficient
+- MPNN experiments: switch to a GPU runtime (T4 minimum, A100 recommended)
+  via Runtime → Change runtime type → GPU
+
+### 3. WandB Account (required for MPNN runs)
+MPNN active learning results are logged to Weights & Biases.
+1. Create a free account at https://wandb.ai
+2. Get your API key from https://wandb.ai/authorize
+3. Create a file at `MyDrive/ASR_Project/.env` containing:
+WANDB_API_KEY=your_key_here
+4. The `.env` file is excluded from the repository (in `.gitignore`)
+   and must be created manually by each user.
+5. Update `WANDB_PROJECT` and `WANDB_ENTITY` in Cell A2 and Cell A9
+   to match your own WandB project, or create a project named
+   `CMU_Automation_S26` in your account.
+
+### 4. Python Dependencies
+All packages are installed automatically by Cell 1 of `colab_runner.ipynb`.
+No separate `requirements.txt` installation is needed. Key packages:
+`PyTDC`, `torch-geometric`, `rdkit`, `kmedoids`, `wandb`, `umap-learn`
+
+### 5. Data
+The TDC HIV dataset downloads automatically on first run (~30 seconds).
+PyG molecular graphs are built once and cached to
+`results/graph_cache/` on your Drive (~2 minutes, then instant on reload).
+No manual data download is required.
+
+### 6. What Is NOT in the Repository
+| File | Reason | What to do |
+|------|--------|------------|
+| `.env` | Contains secret API key | Create manually (see step 3) |
+| `results/graph_cache/*.pt` | Large binary files | Auto-generated on first run |
+| `results/al_*.json` | Experiment checkpoints | Re-run experiments or request from authors |
+| `preprocessing/data/*.xlsx` | Excel result files | Re-run experiments or request from authors |
+---
 
 ## Colab Session Startup (every new session)
 
