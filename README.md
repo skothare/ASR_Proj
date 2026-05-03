@@ -1,7 +1,7 @@
 # MolAL: Molecular Active Learning for Molecular Hit Identification using HIV Drug Discovery Data
 
 <p align="center">
-  <img src="preprocessing/data/MolAL_logo.png" alt="MolAL Logo" width="600">
+  <img src="preprocessing/data/MolAL_logo.png" alt="MolAL Logo" width="200">
 </p>
 
 **Course:** CMU 02-750 Automation of Scientific Research  
