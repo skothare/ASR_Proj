@@ -105,7 +105,56 @@ class RandomForestModel:
         p = np.clip(proba, 1e-9, 1 - 1e-9).astype(np.float64)
         entropy = -(p * np.log(p) + (1 - p) * np.log(1 - p))
         return entropy.astype(np.float32)
+        
+    def bald_uncertainty(self, X: np.ndarray) -> np.ndarray:
+        """
+        BALD for Random Forest using individual tree predictions as the committee.
+        
+        Each tree = one MC sample. Tree disagreement = epistemic uncertainty.
+        
+        BALD = H[mean prediction] - mean[H[individual tree prediction]]
+        """
+        # Get per-tree probability predictions — shape (N, n_trees)
+        # Each estimator returns class probabilities
+        tree_probs = np.array([
+            tree.predict_proba(X)[:, 1]
+            for tree in self._model.estimators_
+        ])  # shape (n_trees, N)
 
+        p_mean = tree_probs.mean(axis=0)              # (N,) — mean across trees
+        p_mean = np.clip(p_mean, 1e-9, 1 - 1e-9)
+
+        # H[mean prediction] — entropy of the averaged prediction
+        H_mean = -(p_mean * np.log(p_mean) +
+                (1 - p_mean) * np.log(1 - p_mean))
+
+        # E[H[individual tree]] — mean entropy of each tree's prediction
+        p_clip = np.clip(tree_probs, 1e-9, 1 - 1e-9)
+        per_tree_H = -(p_clip * np.log(p_clip) +
+                    (1 - p_clip) * np.log(1 - p_clip))
+        E_H = per_tree_H.mean(axis=0)                 # (N,)
+
+        scores = H_mean - E_H                         # (N,) — BALD score
+        return scores.astype(np.float32)
+
+    def expected_improvement(self, X: np.ndarray,
+                          best_so_far: float = 0.035) -> np.ndarray:
+        """
+        Expected Improvement for RF using tree ensemble as surrogate.
+        EI = (p_mean - best) * Phi(Z) + sigma * phi(Z)
+        where Z = (p_mean - best) / sigma
+        """
+        from scipy.stats import norm
+        tree_probs = np.array([
+            tree.predict_proba(X)[:, 1]
+            for tree in self._model.estimators_
+        ])                                          # (n_trees, N)
+        p_mean = tree_probs.mean(axis=0)
+        sigma  = tree_probs.std(axis=0) + 1e-9
+        Z      = (p_mean - best_so_far) / sigma
+        EI     = (p_mean - best_so_far) * norm.cdf(Z) + sigma * norm.pdf(Z)
+        return np.maximum(EI, 0).astype(np.float32)
+        
     def clone_untrained(self) -> "RandomForestModel":
         """Return a fresh (untrained) copy with the same hyperparameters."""
         return RandomForestModel(

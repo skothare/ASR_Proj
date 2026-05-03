@@ -57,6 +57,7 @@ def run_active_learning(
     checkpoint_dir: Optional[str] = None,
     cond_key: Optional[str] = None,
     run_seed: Optional[int] = None,
+    warm_start: bool = True,
 ) -> List[EvalResult]:
     """
     Run the full active learning simulation and return per-iteration metrics.
@@ -93,7 +94,8 @@ def run_active_learning(
  
     results: List[EvalResult] = []
     iteration = 0
- 
+    
+
     if verbose:
         n_init_active = y_pool[init_indices].sum()
         model_type = "MPNN" if is_graph_model else "RF"
@@ -103,36 +105,50 @@ def run_active_learning(
               f"{100*n_init_active/labelled_mask.sum():.1f}%)")
         print(f"  Pool size: {N:,}   Batch size: {batch_size}")
         print(f"  Max iterations: {(N - labelled_mask.sum()) // batch_size + 1}")
- 
+
+    # Initialize warm start state (before the while loop)
+    warm_model = None
+
     while True:
-        # 1. Get current labeled set 
         labeled_indices = np.where(labelled_mask)[0]
-        y_labeled = y_pool[labeled_indices]
- 
+        y_labeled       = y_pool[labeled_indices]
+
         if is_graph_model:
             data_labeled = [graphs_pool[i] for i in labeled_indices]
         else:
             X_labeled = X_pool[labeled_indices]
- 
-        # Guard: need at least 2 classes to train a classifier
         if len(np.unique(y_labeled)) < 2:
             if verbose:
-                print(f"  Iter {iteration}: skipping eval "
-                      "(only one class in labelled set so far)")
+                print(f"  Iter {iteration}: skipping (only one class)")
         else:
-            # 2. Train on labeled set
-            fresh_model = model.clone_untrained()
+            # ── Model selection: warm or cold start ───────────────────────
+            if warm_start and warm_model is not None:
+                # Warm: continue fine-tuning from previous iteration's weights
+                current_model = warm_model
+                lr_now        = 3e-4 if iteration < 3 else 1e-4
+                patience_now  = 10   if iteration < 5 else 7
+            else:
+                # Cold: fresh random weights every iteration
+                current_model = model.clone_untrained()
+                lr_now        = None   # use model's default LR
+                patience_now  = 10
+
             if is_graph_model:
-                fresh_model.fit(
+                current_model.fit(
                     data_labeled, y_labeled,
                     graphs_val=graphs_val,
                     y_val=y_val,
-                    patience=10,
+                    patience=patience_now,
+                    lr_override=lr_now,
                 )
             else:
-                fresh_model.fit(X_labeled, y_labeled)
- 
-            # 3. Evaluate on test set 
+                current_model.fit(X_labeled, y_labeled)
+
+            warm_model  = current_model   # always save — only used if warm_start=True
+            fresh_model = current_model
+
+
+            # ── Evaluate on test set ───────────────────────────────────
             if is_graph_model:
                 result = evaluate(
                     model=fresh_model,

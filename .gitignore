@@ -3,4 +3,7 @@
 
 *.DS_Store
 figures/
+results/
 .env
+*.xlsx
+*.json
