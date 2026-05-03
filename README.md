@@ -1,5 +1,9 @@
 # MolAL: Molecular Active Learning for Molecular Hit Identification using HIV Drug Discovery Data
-![MolAL Logo](preprocessing/data/MolAL_logo.png)
+
+<p align="center">
+  <img src="preprocessing/data/MolAL_logo.png" alt="MolAL Logo" width="600">
+</p>
+
 **Course:** CMU 02-750 Automation of Scientific Research  
 **Authors:** Juhi Munmun Gupta, Sumeet Kothare
 **Dataset:** TDC HIV High-Throughput Screening (41,127 molecules, 3.5% active rate, scaffold split)
